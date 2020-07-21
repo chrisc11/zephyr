@@ -70,7 +70,7 @@ static ALWAYS_INLINE bool arch_is_in_isr(void)
  */
 static ALWAYS_INLINE bool arch_is_in_nested_exception(const z_arch_esf_t *esf)
 {
-	return (esf->basic.xpsr & IPSR_ISR_Msk) ? (true) : (false);
+	return esf->nested_exc;
 }
 
 /**

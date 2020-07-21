@@ -73,6 +73,7 @@ GTEXT(z_arm_exc_exit);
 extern "C" {
 #endif
 
+/* The stack frame pushed by the MCU on exception entry */
 struct __esf {
 	struct __basic_sf {
 		sys_define_gpr_with_alias(a1, r0);
@@ -91,7 +92,26 @@ struct __esf {
 #endif
 };
 
-typedef struct __esf z_arch_esf_t;
+/* The registers not preserved by hardware on exception entry */
+struct __callee_saved_esf {
+	uint32_t r4;
+	uint32_t r5;
+	uint32_t r6;
+	uint32_t r7;
+	uint32_t r8;
+	uint32_t r9;
+	uint32_t r10;
+	uint32_t r11;
+	uint32_t exc_return;
+};
+
+struct __full_esf {
+	struct __esf *exception_frame;
+	bool nested_exc;
+	struct __callee_saved_esf *callee_regs;
+};
+
+typedef struct __full_esf z_arch_esf_t;
 
 #ifdef CONFIG_CPU_CORTEX_M
 extern void z_arm_exc_exit(void);

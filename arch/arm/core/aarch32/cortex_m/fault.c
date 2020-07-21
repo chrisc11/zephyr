@@ -173,13 +173,14 @@ static const struct z_exc_handle exceptions[] = {
 static bool memory_fault_recoverable(z_arch_esf_t *esf)
 {
 #ifdef CONFIG_USERSPACE
+	struct __esf *hw_esf = esf->exception_frame;
 	for (int i = 0; i < ARRAY_SIZE(exceptions); i++) {
 		/* Mask out instruction mode */
 		uint32_t start = (uint32_t)exceptions[i].start & ~0x1;
 		uint32_t end = (uint32_t)exceptions[i].end & ~0x1;
 
-		if (esf->basic.pc >= start && esf->basic.pc < end) {
-			esf->basic.pc = (uint32_t)(exceptions[i].fixup);
+		if (hw_esf->basic.pc >= start && hw_esf->basic.pc < end) {
+			hw_esf->basic.pc = (uint32_t)(exceptions[i].fixup);
 			return true;
 		}
 	}
@@ -621,7 +622,7 @@ static uint32_t hard_fault(z_arch_esf_t *esf, bool *recoverable)
 	 * priority. We handle the case of Kernel OOPS and Stack
 	 * Fail here.
 	 */
-	uint16_t *ret_addr = (uint16_t *)esf->basic.pc;
+	uint16_t *ret_addr = (uint16_t *)esf->exception_frame->basic.pc;
 	/* SVC is a 16-bit instruction. On a synchronous SVC
 	 * escalated to Hard Fault, the return address is the
 	 * next instruction, i.e. after the SVC.
@@ -632,8 +633,8 @@ static uint32_t hard_fault(z_arch_esf_t *esf, bool *recoverable)
 	if (((fault_insn & 0xff00) == _SVC_OPCODE) &&
 		((fault_insn & 0x00ff) == _SVC_CALL_RUNTIME_EXCEPT)) {
 
-		PR_EXC("ARCH_EXCEPT with reason %x\n", esf->basic.r0);
-		reason = esf->basic.r0;
+		reason = esf->exception_frame->basic.r0;
+		PR_EXC("ARCH_EXCEPT with reason %x\n", reason);
 	}
 #undef _SVC_OPCODE
 
@@ -736,7 +737,7 @@ static uint32_t fault_handle(z_arch_esf_t *esf, int fault, bool *recoverable)
  *
  * @param secure_esf Pointer to the secure stack frame.
  */
-static void secure_stack_dump(const z_arch_esf_t *secure_esf)
+static void secure_stack_dump(const struct __esf *secure_esf)
 {
 	/*
 	 * In case a Non-Secure exception interrupted the Secure
@@ -761,7 +762,7 @@ static void secure_stack_dump(const z_arch_esf_t *secure_esf)
 		 * Non-Secure exception entry.
 		 */
 		top_of_sec_stack += ADDITIONAL_STATE_CONTEXT_WORDS;
-		secure_esf = (const z_arch_esf_t *)top_of_sec_stack;
+		secure_esf = (const struct __esf *)top_of_sec_stack;
 		sec_ret_addr = secure_esf->basic.pc;
 	} else {
 		/* Exception during Non-Secure function call.
@@ -790,11 +791,11 @@ static void secure_stack_dump(const z_arch_esf_t *secure_esf)
  *
  * @return ESF pointer on success, otherwise return NULL
  */
-static inline z_arch_esf_t *get_esf(uint32_t msp, uint32_t psp, uint32_t exc_return,
-	bool *nested_exc)
+static inline void *get_hardware_esf(uint32_t msp, uint32_t psp,
+	uint32_t exc_return, bool *nested_exc)
 {
 	bool alternative_state_exc = false;
-	z_arch_esf_t *ptr_esf;
+	uint32_t ptr_esf;
 
 	*nested_exc = false;
 
@@ -822,27 +823,27 @@ static inline z_arch_esf_t *get_esf(uint32_t msp, uint32_t psp, uint32_t exc_ret
 		alternative_state_exc = true;
 
 		/* Dump the Secure stack before handling the actual fault. */
-		z_arch_esf_t *secure_esf;
+		uint32_t secure_esf;
 
 		if (exc_return & EXC_RETURN_SPSEL_PROCESS) {
 			/* Secure stack pointed by PSP */
-			secure_esf = (z_arch_esf_t *)psp;
+			secure_esf = psp;
 		} else {
 			/* Secure stack pointed by MSP */
-			secure_esf = (z_arch_esf_t *)msp;
+			secure_esf = msp;
 			*nested_exc = true;
 		}
 
-		SECURE_STACK_DUMP(secure_esf);
+		SECURE_STACK_DUMP((struct __esf *)secure_esf);
 
 		/* Handle the actual fault.
 		 * Extract the correct stack frame from the Non-Secure state
 		 * and supply it to the fault handing function.
 		 */
 		if (exc_return & EXC_RETURN_MODE_THREAD) {
-			ptr_esf = (z_arch_esf_t *)__TZ_get_PSP_NS();
+			ptr_esf = __TZ_get_PSP_NS();
 		} else {
-			ptr_esf = (z_arch_esf_t *)__TZ_get_MSP_NS();
+			ptr_esf = __TZ_get_MSP_NS();
 		}
 	}
 #elif defined(CONFIG_ARM_NONSECURE_FIRMWARE)
@@ -867,10 +868,10 @@ static inline z_arch_esf_t *get_esf(uint32_t msp, uint32_t psp, uint32_t exc_ret
 
 		if (exc_return & EXC_RETURN_SPSEL_PROCESS) {
 			/* Non-Secure stack frame on PSP */
-			ptr_esf = (z_arch_esf_t *)psp;
+			ptr_esf = psp;
 		} else {
 			/* Non-Secure stack frame on MSP */
-			ptr_esf = (z_arch_esf_t *)msp;
+			ptr_esf = msp;
 		}
 	} else {
 		/* Exception entry occurred in Non-Secure stack. */
@@ -889,16 +890,16 @@ static inline z_arch_esf_t *get_esf(uint32_t msp, uint32_t psp, uint32_t exc_ret
 	if (!alternative_state_exc) {
 		if (exc_return & EXC_RETURN_MODE_THREAD) {
 			/* Returning to thread mode */
-			ptr_esf =  (z_arch_esf_t *)psp;
+			ptr_esf =  psp;
 
 		} else {
 			/* Returning to handler mode */
-			ptr_esf = (z_arch_esf_t *)msp;
+			ptr_esf = msp;
 			*nested_exc = true;
 		}
 	}
 
-	return ptr_esf;
+	return (void *)ptr_esf;
 }
 
 /**
@@ -928,20 +929,22 @@ static inline z_arch_esf_t *get_esf(uint32_t msp, uint32_t psp, uint32_t exc_ret
  *
  * @param msp MSP value immediately after the exception occurred
  * @param psp PSP value immediately after the exception occurred
- * @param exc_return EXC_RETURN value present in LR after exception entry.
- *
+ * @param callee_regs Registers that are not part of the hardware esf
+ * (r4-r11 & EXC_RETURN)
  */
-void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return)
+void z_arm_fault(uint32_t msp, uint32_t psp,
+	struct __callee_saved_esf *callee_regs)
 {
 	uint32_t reason = K_ERR_CPU_EXCEPTION;
 	int fault = SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk;
 	bool recoverable, nested_exc;
-	z_arch_esf_t *esf;
+	struct __esf *hardware_esf;
+	const uint32_t exc_return = callee_regs->exc_return;
 
 	/* Create a stack-ed copy of the ESF to be used during
 	 * the fault handling process.
 	 */
-	z_arch_esf_t esf_copy;
+	z_arch_esf_t esf;
 
 	/* Force unlock interrupts */
 	arch_irq_unlock(0);
@@ -949,32 +952,21 @@ void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return)
 	/* Retrieve the Exception Stack Frame (ESF) to be supplied
 	 * as argument to the remainder of the fault handling process.
 	 */
-	 esf = get_esf(msp, psp, exc_return, &nested_exc);
-	__ASSERT(esf != NULL,
+
+	 hardware_esf = get_hardware_esf(msp, psp, exc_return, &nested_exc);
+	__ASSERT(hardware_esf != NULL,
 		"ESF could not be retrieved successfully. Shall never occur.");
 
-	reason = fault_handle(esf, fault, &recoverable);
+	esf.exception_frame = hardware_esf;
+	esf.nested_exc = nested_exc;
+	esf.callee_regs = callee_regs;
+
+	reason = fault_handle(&esf, fault, &recoverable);
 	if (recoverable) {
 		return;
 	}
 
-	/* Copy ESF */
-	memcpy(&esf_copy, esf, sizeof(z_arch_esf_t));
-
-	/* Overwrite stacked IPSR to mark a nested exception,
-	 * or a return to Thread mode. Note that this may be
-	 * required, if the retrieved ESF contents are invalid
-	 * due to, for instance, a stacking error.
-	 */
-	if (nested_exc) {
-		if ((esf_copy.basic.xpsr & IPSR_ISR_Msk) == 0) {
-			esf_copy.basic.xpsr |= IPSR_ISR_Msk;
-		}
-	} else {
-		esf_copy.basic.xpsr &= ~(IPSR_ISR_Msk);
-	}
-
-	z_arm_fatal_error(reason, &esf_copy);
+	z_arm_fatal_error(reason, &esf);
 }
 
 /**
